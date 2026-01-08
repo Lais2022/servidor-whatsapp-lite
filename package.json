@@ -1,0 +1,14 @@
+{
+  "name": "whatsapp-server-lite",
+  "version": "1.0.0",
+  "main": "servidor.js",
+  "type": "module",
+  "scripts": {
+    "start": "node servidor.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.16",
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}
