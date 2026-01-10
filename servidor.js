@@ -1,162 +1,158 @@
-import express from "express";
-import cors from "cors";
-import fs from "fs";
-import {
-  makeWASocket,
+// ============================================================
+// WHATSAPP SERVER LITE - VERSÃO COMPLETA
+// ============================================================
+
+import express from 'express';
+import cors from 'cors';
+import makeWASocket, { 
+  DisconnectReason, 
   useMultiFileAuthState,
-  fetchLatestBaileysVersion,
-  DisconnectReason
-} from "@whiskeysockets/baileys";
+  makeCacheableSignalKeyStore,
+  fetchLatestBaileysVersion
+} from '@whiskeysockets/baileys';
+import { Boom } from '@hapi/boom';
+import pino from 'pino';
+import fs from 'fs';
 
 const app = express();
-app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+const PORT = process.env.PORT || 3000;
 
-const AUTH_DIR = "./auth";
+app.use(cors());
+app.use(express.json({ limit: '50mb' }));
+
+const logger = pino({ level: 'warn' });
 
 let sock = null;
+let qrCode = null;
 let isConnected = false;
-let lastQr = null;
 let messages = [];
+const MAX_MESSAGES = 100;
+const AUTH_FOLDER = './auth_info';
 
-function pushMessage(msg) {
+const formatPhone = (phone) => {
+  if (!phone) return null;
+  if (phone.includes('@')) return phone;
+  return `${phone.replace(/\D/g, '')}@s.whatsapp.net`;
+};
+
+const addMessage = (msg) => {
   messages.unshift(msg);
-  messages = messages.slice(0, 200);
+  if (messages.length > MAX_MESSAGES) messages = messages.slice(0, MAX_MESSAGES);
+};
+
+async function connectWhatsApp() {
+  try {
+    if (!fs.existsSync(AUTH_FOLDER)) fs.mkdirSync(AUTH_FOLDER, { recursive: true });
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
+    const { version } = await fetchLatestBaileysVersion();
+
+    sock = makeWASocket({
+      version,
+      auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
+      printQRInTerminal: true,
+      logger,
+      browser: ['Ubuntu', 'Chrome', '22.04.4'],
+      syncFullHistory: false,
+    });
+
+    sock.ev.on('connection.update', (update) => {
+      const { connection, lastDisconnect, qr } = update;
+      if (qr) { qrCode = qr; isConnected = false; }
+      if (connection === 'close') {
+        isConnected = false; qrCode = null;
+        const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+        if (reason !== DisconnectReason.loggedOut) setTimeout(connectWhatsApp, 3000);
+        else fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
+      }
+      if (connection === 'open') { isConnected = true; qrCode = null; console.log('WhatsApp conectado!'); }
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('messages.upsert', async ({ messages: newMessages, type }) => {
+      if (type !== 'notify') return;
+      for (const msg of newMessages) {
+        if (!msg.message) continue;
+        addMessage({
+          id: msg.key.id,
+          from: msg.key.remoteJid,
+          fromMe: msg.key.fromMe,
+          text: msg.message.conversation || msg.message.extendedTextMessage?.text || '',
+          timestamp: msg.messageTimestamp * 1000,
+        });
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao conectar:', error);
+    setTimeout(connectWhatsApp, 5000);
+  }
 }
 
-function resetAuthFolder() {
+// ROTAS
+app.get('/', (req, res) => res.json({ ok: true, connected: isConnected }));
+app.get('/status', (req, res) => res.json({ ok: true, connected: isConnected }));
+app.get('/qr', (req, res) => res.json({ qr: isConnected ? null : qrCode }));
+app.get('/messages', (req, res) => res.json({ messages }));
+
+// ENVIAR TEXTO
+app.post('/send', async (req, res) => {
   try {
-    fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-  } catch {}
-}
-
-async function closeSock() {
-  try { sock?.end?.(); } catch {}
-  try { sock?.ws?.close?.(); } catch {}
-  sock = null;
-  isConnected = false;
-  lastQr = null;
-}
-
-async function start() {
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-  const { version } = await fetchLatestBaileysVersion();
-
-  sock = makeWASocket({
-    version,
-    auth: state,
-    printQRInTerminal: false
-  });
-
-  sock.ev.on("creds.update", saveCreds);
-
-  sock.ev.on("connection.update", (u) => {
-    const { connection, lastDisconnect, qr } = u;
-
-    if (qr) lastQr = qr;
-
-    if (connection === "open") {
-      isConnected = true;
-      lastQr = null;
-      console.log("WhatsApp conectado");
-    }
-
-    if (connection === "close") {
-      isConnected = false;
-      const code = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = code !== DisconnectReason.loggedOut;
-      console.log("Conexao fechada. code=", code, "reconnect=", shouldReconnect);
-      if (shouldReconnect) start();
-    }
-  });
-
-  sock.ev.on("messages.upsert", ({ messages: ms }) => {
-    for (const m of ms) {
-      const text =
-        m.message?.conversation ||
-        m.message?.extendedTextMessage?.text ||
-        "";
-
-      pushMessage({
-        id: m.key.id,
-        from: m.key.remoteJid,
-        fromMe: !!m.key.fromMe,
-        text,
-        timestamp: Date.now()
-      });
-    }
-  });
-}
-
-// ========== ENDPOINTS ==========
-
-app.get("/status", (req, res) => {
-  res.json({ ok: true, connected: isConnected });
+    const { to, text, message } = req.body;
+    if (!isConnected) return res.status(503).json({ ok: false, error: 'Desconectado' });
+    const result = await sock.sendMessage(formatPhone(to), { text: text || message });
+    res.json({ ok: true, success: true, id: result?.key?.id });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-app.get("/qr", (req, res) => {
-  res.json({ qr: lastQr });
-});
-
-app.get("/messages", (req, res) => {
-  res.json({ messages });
-});
-
-app.post("/send", async (req, res) => {
+// ENVIAR ÁUDIO (PTT)
+app.post('/send-audio', async (req, res) => {
   try {
-    const { to, text } = req.body;
-    if (!sock) return res.status(400).json({ ok: false, error: "sock_not_ready" });
-    if (!to || !text) return res.status(400).json({ ok: false, error: "missing_to_or_text" });
+    const { to, audio, mimetype, ptt } = req.body;
+    if (!isConnected) return res.status(503).json({ ok: false, error: 'Desconectado' });
+    const result = await sock.sendMessage(formatPhone(to), {
+      audio: Buffer.from(audio, 'base64'),
+      mimetype: mimetype || 'audio/ogg; codecs=opus',
+      ptt: ptt !== false,
+    });
+    res.json({ ok: true, success: true, id: result?.key?.id });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
 
-    const jid = to.includes("@s.whatsapp.net") ? to : to + "@s.whatsapp.net";
-    await sock.sendMessage(jid, { text: String(text) });
+app.post('/send-ptt', (req, res) => { req.body.ptt = true; return app.handle(req, res); });
 
+// ENVIAR IMAGEM
+app.post('/send-image', async (req, res) => {
+  try {
+    const { to, image, caption } = req.body;
+    if (!isConnected) return res.status(503).json({ ok: false, error: 'Desconectado' });
+    const result = await sock.sendMessage(formatPhone(to), {
+      image: Buffer.from(image, 'base64'),
+      caption: caption || '',
+    });
+    res.json({ ok: true, success: true, id: result?.key?.id });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// ENVIAR DOCUMENTO
+app.post('/send-document', async (req, res) => {
+  try {
+    const { to, document, filename, mimetype } = req.body;
+    if (!isConnected) return res.status(503).json({ ok: false, error: 'Desconectado' });
+    const result = await sock.sendMessage(formatPhone(to), {
+      document: Buffer.from(document, 'base64'),
+      fileName: filename || 'documento',
+      mimetype: mimetype || 'application/octet-stream',
+    });
+    res.json({ ok: true, success: true, id: result?.key?.id });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// LOGOUT
+app.post('/logout', async (req, res) => {
+  try {
+    if (sock) await sock.logout();
+    isConnected = false; qrCode = null;
     res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e.message || e) });
-  }
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-// NOVO: Desconectar (mantém auth)
-app.post("/disconnect", async (req, res) => {
-  try {
-    await closeSock();
-    start().catch(() => {});
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
-// NOVO: Logout (apaga auth, gera QR novo)
-app.post("/logout", async (req, res) => {
-  try {
-    try { await sock?.logout?.(); } catch {}
-    await closeSock();
-    resetAuthFolder();
-    start().catch(() => {});
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
-// NOVO: Reset completo (força novo QR)
-app.post("/reset", async (req, res) => {
-  try {
-    await closeSock();
-    resetAuthFolder();
-    start().catch(() => {});
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log("Server on port", port));
-
-start().catch((e) => {
-  console.error("start error:", e);
-  process.exit(1);
-});
+app.listen(PORT, () => { console.log(`Servidor rodando na porta ${PORT}`); connectWhatsApp(); });
