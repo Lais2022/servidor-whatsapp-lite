@@ -1,14 +1,21 @@
 {
-  "name": "whatsapp-server-lite",
-  "version": "1.0.0",
+  "name": "whatsapp-server",
+  "version": "2.0.0",
+  "description": "WhatsApp Server com Baileys para Render",
   "main": "servidor.js",
-  "type": "module",
   "scripts": {
-    "start": "node servidor.js"
+    "start": "node servidor.js",
+    "dev": "node servidor.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.16",
+    "express": "^4.21.2",
     "cors": "^2.8.5",
-    "express": "^4.19.2"
+    "@whiskeysockets/baileys": "^6.7.16",
+    "@hapi/boom": "^10.0.1",
+    "pino": "^9.6.0"
   }
 }
+
