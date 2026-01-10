@@ -66,9 +66,12 @@ const pino = require('pino');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// IMPORTANTE: Use /var/data se tiver Persistent Disk no Render
-// Caso contrário, use ./auth_info (mas vai perder sessão em restart)
-const AUTH_FOLDER = process.env.AUTH_PATH || '/var/data/auth_info';
+// IMPORTANTE: No plano gratuito do Render, use ./auth_info (local)
+// Com Persistent Disk (pago), pode usar /var/data/auth_info
+// Detecta automaticamente se /var/data existe (Persistent Disk)
+const AUTH_FOLDER = process.env.AUTH_PATH || (
+  fs.existsSync('/var/data') ? '/var/data/auth_info' : './auth_info'
+);
 
 // Middleware
 app.use(cors({
@@ -76,7 +79,7 @@ app.use(cors({
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
-app.use(express.json({ limit: '50mb' })); // Suporta áudio/imagens grandes
+app.use(express.json({ limit: '50mb' }));
 
 // Logger (silencioso para não poluir logs do Render)
 const logger = pino({ level: 'warn' });
@@ -97,26 +100,14 @@ const MAX_MESSAGES = 200;
 // FUNÇÕES AUXILIARES
 // ============================================================
 
-/**
- * Formata telefone para JID do WhatsApp
- * Aceita: número puro, @s.whatsapp.net, @c.us, @lid
- */
 const formatPhone = (phone) => {
   if (!phone) return null;
-  
-  // Se já é um JID completo, retorna como está
   if (phone.includes('@')) return phone;
-  
-  // Remove tudo que não é número
   const digits = phone.replace(/\D/g, '');
   if (!digits) return null;
-  
   return `${digits}@s.whatsapp.net`;
 };
 
-/**
- * Adiciona mensagem ao histórico (limite de MAX_MESSAGES)
- */
 const addMessage = (msg) => {
   messages.unshift(msg);
   if (messages.length > MAX_MESSAGES) {
@@ -124,9 +115,6 @@ const addMessage = (msg) => {
   }
 };
 
-/**
- * Log com timestamp
- */
 const log = (level, action, detail = '') => {
   const ts = new Date().toISOString();
   const emoji = level === 'error' ? '❌' : level === 'warn' ? '⚠️' : level === 'success' ? '✅' : 'ℹ️';
@@ -153,7 +141,6 @@ async function connectWhatsApp() {
       log('info', 'auth', `Pasta de auth criada: ${AUTH_FOLDER}`);
     }
 
-    // Carrega credenciais salvas (se existirem)
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
     const { version } = await fetchLatestBaileysVersion();
 
@@ -165,25 +152,22 @@ async function connectWhatsApp() {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
-      printQRInTerminal: true, // Mostra QR no terminal também
+      printQRInTerminal: true,
       logger,
       browser: ['WhatsApp Server', 'Chrome', '22.04'],
       syncFullHistory: false,
       markOnlineOnConnect: true,
     });
 
-    // ========== EVENTOS DE CONEXÃO ==========
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
-      // QR Code recebido
       if (qr) {
         qrCode = qr;
         isConnected = false;
         log('info', 'qr', 'Novo QR Code gerado. Escaneie com o WhatsApp.');
       }
 
-      // Conexão fechada
       if (connection === 'close') {
         isConnected = false;
         isConnecting = false;
@@ -194,9 +178,7 @@ async function connectWhatsApp() {
 
         log('warn', 'disconnect', `Conexão fechada. Motivo: ${reasonName} (${reason})`);
 
-        // Decide se reconecta automaticamente
         if (reason === DisconnectReason.loggedOut) {
-          // Logout explícito - limpa credenciais
           log('info', 'logout', 'Logout detectado. Limpando credenciais...');
           try {
             fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
@@ -205,23 +187,19 @@ async function connectWhatsApp() {
           }
           connectionError = 'Deslogado. Escaneie o QR Code novamente.';
         } else if (reason === DisconnectReason.restartRequired) {
-          // Restart necessário
           log('info', 'restart', 'Restart necessário. Reconectando em 1s...');
           setTimeout(connectWhatsApp, 1000);
         } else if (reason === DisconnectReason.connectionClosed ||
                    reason === DisconnectReason.connectionLost ||
                    reason === DisconnectReason.timedOut) {
-          // Conexão perdida - reconecta
           log('info', 'reconnect', 'Conexão perdida. Reconectando em 3s...');
           setTimeout(connectWhatsApp, 3000);
         } else {
-          // Outros motivos - tenta reconectar
           log('info', 'reconnect', `Tentando reconectar em 5s...`);
           setTimeout(connectWhatsApp, 5000);
         }
       }
 
-      // Conexão aberta com sucesso
       if (connection === 'open') {
         isConnected = true;
         isConnecting = false;
@@ -231,10 +209,8 @@ async function connectWhatsApp() {
       }
     });
 
-    // ========== SALVAR CREDENCIAIS ==========
     sock.ev.on('creds.update', saveCreds);
 
-    // ========== RECEBER MENSAGENS ==========
     sock.ev.on('messages.upsert', async ({ messages: newMessages, type }) => {
       if (type !== 'notify') return;
 
@@ -244,10 +220,8 @@ async function connectWhatsApp() {
         const from = msg.key.remoteJid;
         const fromMe = msg.key.fromMe;
 
-        // Ignora grupos e status
         if (from === 'status@broadcast' || from?.endsWith('@g.us')) continue;
 
-        // Extrai texto da mensagem
         const text =
           msg.message.conversation ||
           msg.message.extendedTextMessage?.text ||
@@ -256,17 +230,14 @@ async function connectWhatsApp() {
           msg.message.documentMessage?.caption ||
           '';
 
-        // Extrai nome do contato
         const pushName = msg.pushName || '';
 
-        // Timestamp
         const timestamp = msg.messageTimestamp
           ? (typeof msg.messageTimestamp === 'number'
               ? msg.messageTimestamp * 1000
               : Number(msg.messageTimestamp) * 1000)
           : Date.now();
 
-        // Tipo da mensagem
         const msgType = Object.keys(msg.message)[0];
 
         const parsed = {
@@ -277,7 +248,7 @@ async function connectWhatsApp() {
           name: pushName,
           timestamp,
           type: msgType,
-          raw: msg, // Guarda original para debug
+          raw: msg,
         };
 
         addMessage(parsed);
@@ -289,8 +260,6 @@ async function connectWhatsApp() {
     isConnecting = false;
     connectionError = error.message;
     log('error', 'connect', `Erro ao conectar: ${error.message}`);
-    
-    // Tenta novamente em 10s
     setTimeout(connectWhatsApp, 10000);
   }
 }
@@ -299,7 +268,6 @@ async function connectWhatsApp() {
 // ROTAS DA API
 // ============================================================
 
-// ---------- HEALTH CHECK ----------
 app.get('/', (req, res) => {
   res.json({
     ok: true,
@@ -314,7 +282,6 @@ app.get('/', (req, res) => {
   });
 });
 
-// ---------- STATUS ----------
 app.get('/status', (req, res) => {
   res.json({
     ok: true,
@@ -326,20 +293,16 @@ app.get('/status', (req, res) => {
   });
 });
 
-// ---------- QR CODE ----------
 app.get('/qr', (req, res) => {
   if (isConnected) {
     return res.json({ qr: null, connected: true, message: 'Já conectado' });
   }
-
   if (isConnecting && !qrCode) {
     return res.json({ qr: null, connecting: true, message: 'Gerando QR Code...' });
   }
-
   res.json({ qr: qrCode || null });
 });
 
-// ---------- MENSAGENS ----------
 app.get('/messages', (req, res) => {
   const limit = parseInt(req.query.limit) || 50;
   res.json({ messages: messages.slice(0, limit) });
@@ -349,7 +312,6 @@ app.get('/messages', (req, res) => {
 // ENVIO DE MENSAGENS
 // ============================================================
 
-// ---------- ENVIAR TEXTO ----------
 app.post('/send', async (req, res) => {
   try {
     const { to, text, message } = req.body;
@@ -358,7 +320,6 @@ app.post('/send', async (req, res) => {
     if (!to || !content) {
       return res.status(400).json({ ok: false, error: 'Faltando "to" ou "text"' });
     }
-
     if (!isConnected || !sock) {
       return res.status(503).json({ ok: false, error: 'Desconectado' });
     }
@@ -369,7 +330,6 @@ app.post('/send', async (req, res) => {
     }
 
     log('info', 'send', `Enviando texto para ${jid}: ${content.slice(0, 50)}...`);
-
     const result = await sock.sendMessage(jid, { text: content });
 
     log('success', 'send', `Texto enviado. ID: ${result?.key?.id}`);
@@ -381,9 +341,6 @@ app.post('/send', async (req, res) => {
   }
 });
 
-// ---------- ENVIAR ÁUDIO (PTT / Voice Message) ----------
-// IMPORTANTE: WhatsApp só aceita audio/ogg; codecs=opus ou audio/mp4
-// Navegadores gravam em webm, então o servidor precisa converter!
 app.post('/send-audio', async (req, res) => {
   try {
     const { to, audio, mimetype, ptt } = req.body;
@@ -391,7 +348,6 @@ app.post('/send-audio', async (req, res) => {
     if (!to || !audio) {
       return res.status(400).json({ ok: false, error: 'Faltando "to" ou "audio"' });
     }
-
     if (!isConnected || !sock) {
       return res.status(503).json({ ok: false, error: 'Desconectado' });
     }
@@ -401,7 +357,6 @@ app.post('/send-audio', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Telefone inválido' });
     }
 
-    // Decodifica base64 para buffer
     let audioBuffer = Buffer.from(audio, 'base64');
     let finalMimetype = 'audio/ogg; codecs=opus';
 
@@ -410,7 +365,6 @@ app.post('/send-audio', async (req, res) => {
     
     log('info', 'send-audio', `Recebido áudio (${Math.round(audioBuffer.length / 1024)}KB, ${inputMimetype}) para ${jid}`);
 
-    // Se for webm, tenta converter para ogg usando ffmpeg
     if (isWebm) {
       try {
         const { execSync } = require('child_process');
@@ -419,30 +373,23 @@ app.post('/send-audio', async (req, res) => {
         const inputPath = path.join(tmpDir, `audio_${Date.now()}.webm`);
         const outputPath = path.join(tmpDir, `audio_${Date.now()}.ogg`);
         
-        // Salva arquivo temporário
         fs.writeFileSync(inputPath, audioBuffer);
         
-        // Converte com ffmpeg (precisa estar instalado no Render - veja instruções)
-        // Comando: ffmpeg -i input.webm -c:a libopus output.ogg
         execSync(`ffmpeg -i "${inputPath}" -c:a libopus -b:a 64k "${outputPath}" -y`, {
           timeout: 30000,
           stdio: 'pipe',
         });
         
-        // Lê arquivo convertido
         audioBuffer = fs.readFileSync(outputPath);
         finalMimetype = 'audio/ogg; codecs=opus';
         
-        // Limpa arquivos temporários
         try { fs.unlinkSync(inputPath); } catch {}
         try { fs.unlinkSync(outputPath); } catch {}
         
         log('success', 'send-audio', `Áudio convertido de webm para ogg (${Math.round(audioBuffer.length / 1024)}KB)`);
         
       } catch (conversionError) {
-        // Se ffmpeg falhar, tenta enviar assim mesmo (alguns WhatsApp aceitam)
         log('warn', 'send-audio', `Conversão falhou (${conversionError.message}), tentando enviar webm diretamente...`);
-        // Usa mp4 como fallback - WhatsApp às vezes aceita
         finalMimetype = 'audio/mp4';
       }
     } else if (inputMimetype.includes('ogg') || inputMimetype.includes('opus')) {
@@ -453,11 +400,10 @@ app.post('/send-audio', async (req, res) => {
 
     log('info', 'send-audio', `Enviando áudio como ${finalMimetype} (${Math.round(audioBuffer.length / 1024)}KB) para ${jid}`);
 
-    // Envia como PTT (mensagem de voz)
     const result = await sock.sendMessage(jid, {
       audio: audioBuffer,
       mimetype: finalMimetype,
-      ptt: ptt !== false, // true por padrão = mensagem de voz (bolinha verde)
+      ptt: ptt !== false,
     });
 
     log('success', 'send-audio', `Áudio enviado. ID: ${result?.key?.id}`);
@@ -469,14 +415,11 @@ app.post('/send-audio', async (req, res) => {
   }
 });
 
-// Alias /send-ptt -> /send-audio com ptt=true
 app.post('/send-ptt', async (req, res) => {
   req.body.ptt = true;
-  // Chama o handler de /send-audio
   return app._router.handle({ ...req, url: '/send-audio', originalUrl: '/send-audio' }, res, () => {});
 });
 
-// ---------- ENVIAR IMAGEM ----------
 app.post('/send-image', async (req, res) => {
   try {
     const { to, image, caption } = req.body;
@@ -484,7 +427,6 @@ app.post('/send-image', async (req, res) => {
     if (!to || !image) {
       return res.status(400).json({ ok: false, error: 'Faltando "to" ou "image"' });
     }
-
     if (!isConnected || !sock) {
       return res.status(503).json({ ok: false, error: 'Desconectado' });
     }
@@ -512,7 +454,6 @@ app.post('/send-image', async (req, res) => {
   }
 });
 
-// ---------- ENVIAR VÍDEO ----------
 app.post('/send-video', async (req, res) => {
   try {
     const { to, video, caption, mimetype } = req.body;
@@ -520,7 +461,6 @@ app.post('/send-video', async (req, res) => {
     if (!to || !video) {
       return res.status(400).json({ ok: false, error: 'Faltando "to" ou "video"' });
     }
-
     if (!isConnected || !sock) {
       return res.status(503).json({ ok: false, error: 'Desconectado' });
     }
@@ -549,7 +489,6 @@ app.post('/send-video', async (req, res) => {
   }
 });
 
-// ---------- ENVIAR DOCUMENTO ----------
 app.post('/send-document', async (req, res) => {
   try {
     const { to, document, filename, mimetype } = req.body;
@@ -557,7 +496,6 @@ app.post('/send-document', async (req, res) => {
     if (!to || !document) {
       return res.status(400).json({ ok: false, error: 'Faltando "to" ou "document"' });
     }
-
     if (!isConnected || !sock) {
       return res.status(503).json({ ok: false, error: 'Desconectado' });
     }
@@ -586,7 +524,6 @@ app.post('/send-document', async (req, res) => {
   }
 });
 
-// ---------- ENVIAR MÍDIA GENÉRICO ----------
 app.post('/send-media', async (req, res) => {
   try {
     const { to, media, type, mimetype, filename, caption } = req.body;
@@ -594,7 +531,6 @@ app.post('/send-media', async (req, res) => {
     if (!to || !media) {
       return res.status(400).json({ ok: false, error: 'Faltando "to" ou "media"' });
     }
-
     if (!isConnected || !sock) {
       return res.status(503).json({ ok: false, error: 'Desconectado' });
     }
@@ -641,7 +577,6 @@ app.post('/send-media', async (req, res) => {
 // CONTROLE DE CONEXÃO
 // ============================================================
 
-// ---------- LOGOUT / DESCONECTAR ----------
 app.post('/logout', async (req, res) => {
   try {
     log('info', 'logout', 'Executando logout...');
@@ -654,7 +589,6 @@ app.post('/logout', async (req, res) => {
     isConnecting = false;
     qrCode = null;
 
-    // Limpa credenciais
     try {
       fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
       log('info', 'logout', 'Credenciais removidas');
@@ -670,7 +604,6 @@ app.post('/logout', async (req, res) => {
   }
 });
 
-// ---------- RECONECTAR ----------
 app.post('/reconnect', async (req, res) => {
   try {
     log('info', 'reconnect', 'Forçando reconexão...');
@@ -683,7 +616,6 @@ app.post('/reconnect', async (req, res) => {
     isConnecting = false;
     qrCode = null;
 
-    // Inicia nova conexão
     setTimeout(connectWhatsApp, 1000);
 
     res.json({ ok: true, message: 'Reconectando...' });
@@ -722,7 +654,6 @@ app.listen(PORT, () => {
   console.log('╚════════════════════════════════════════════════════════════╝');
   console.log('');
 
-  // Inicia conexão ao WhatsApp automaticamente
   connectWhatsApp();
 });
 
