@@ -1,18 +1,20 @@
 {
   "name": "whatsapp-server",
   "version": "4.0.0",
+  "description": "WhatsApp Server Always-On com Baileys para Render",
   "main": "servidor.js",
   "scripts": {
-    "start": "node servidor.js"
+    "start": "node servidor.js",
+    "dev": "node servidor.js"
   },
   "engines": {
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "express": "^4.21.2",
+    "cors": "^2.8.5",
     "@whiskeysockets/baileys": "^6.7.16",
     "@hapi/boom": "^10.0.1",
-    "cors": "^2.8.5",
-    "express": "^4.21.2",
     "pino": "^9.6.0",
     "qrcode": "^1.5.4"
   }
