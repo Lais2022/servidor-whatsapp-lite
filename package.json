@@ -4,8 +4,7 @@
   "description": "WhatsApp Server Always-On com Baileys para Render",
   "main": "servidor.js",
   "scripts": {
-    "start": "node servidor.js",
-    "dev": "node servidor.js"
+    "start": "node servidor.js"
   },
   "engines": {
     "node": ">=18.0.0"
