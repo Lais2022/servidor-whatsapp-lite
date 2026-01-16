@@ -1,31 +1,30 @@
 FROM node:20-slim
 
-# Instala dependências do sistema
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg git openssh-client && \
-    rm -rf /var/lib/apt/lists/*
+# Instala dependências do sistema (ffmpeg para áudio/vídeo)
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
-# Força git a usar HTTPS
-RUN git config --global url."https://github.com/".insteadOf ssh://git@github.com/
-RUN git config --global url."https://github.com/".insteadOf git@github.com:
-
-# Define diretório de trabalho
 WORKDIR /app
 
-# Copia package.json primeiro (cache)
+# Copia package.json primeiro para cache de dependências
 COPY package*.json ./
 
 # Instala dependências
-RUN npm install --omit=dev
+RUN npm install --production
 
-# Copia o restante do projeto
+# Copia código
 COPY . .
 
-# Cria pastas necessárias
-RUN mkdir -p auth_info /var/data/auth_info /var/data/media
+# Cria pastas de dados
+RUN mkdir -p /var/data/auth_info /var/data/media
 
-# Expõe a porta
+# Expõe porta
 EXPOSE 3000
 
-# 🔥 COMANDO QUE MANTÉM O CONTAINER VIVO
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD node -e "require('http').get('http://localhost:3000/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1))"
+
+# Inicia servidor
 CMD ["node", "servidor.js"]
